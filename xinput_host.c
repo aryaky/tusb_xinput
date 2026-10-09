@@ -1105,12 +1105,25 @@ bool xinputh_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, ui
             else if (rdata[0] == GIP_CMD_ANNOUNCE)
             {
                 xboxone_init(xid_itf, dev_addr, instance);
+                // Also feed the announce to the auth passthrough so it can ask
+                // the controller for its GIP device descriptor and drive the
+                // announce -> descriptor -> power-on handshake forward.
+                xbone_auth_report_received(dev_addr, instance, rdata, xferred_bytes);
             }
             else if (rdata[0] == GIP_CMD_AUTHENTICATE || rdata[0] == GIP_CMD_FINAL_AUTH)
             {
                 // Auth response from Xbox One controller - forward to auth passthrough
                 printf("[xinput_host] Auth response from controller: cmd=0x%02x len=%lu\n",
                        rdata[0], (unsigned long)xferred_bytes);
+                xbone_auth_report_received(dev_addr, instance, rdata, xferred_bytes);
+            }
+            else if (rdata[0] != GIP_CMD_ACK)
+            {
+                // Any other GIP command from the controller (device descriptor,
+                // power mode, ...) has to reach the auth passthrough too: it is
+                // the descriptor reply that marks the dongle ready, and without
+                // that the console's auth challenge is never forwarded and the
+                // console never accepts the device.
                 xbone_auth_report_received(dev_addr, instance, rdata, xferred_bytes);
             }
         }
