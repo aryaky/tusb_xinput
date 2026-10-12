@@ -179,6 +179,10 @@ bool tuh_xinput_receive_report(uint8_t dev_addr, uint8_t instance);
  * @return True if the report is sent successfully, false otherwise.
  */
 bool tuh_xinput_send_report(uint8_t dev_addr, uint8_t instance, const uint8_t *txbuf, uint16_t len);
+// Cancel an OUT transfer that never completed. Without this a wedged transfer
+// keeps usbh_edpt_claim() returning "busy" forever, which stranded the whole
+// report queue (ACKs stopped, the controller's chunked upload stalled).
+bool tuh_xinput_abort_out(uint8_t dev_addr, uint8_t instance);
 
 /**
  * @brief Set LED status on an XInput device. (Applicated to Xbox 360 controllers only)

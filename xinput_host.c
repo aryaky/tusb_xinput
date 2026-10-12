@@ -8,6 +8,7 @@
 #include "host/usbh.h"
 #include "host/usbh_pvt.h"
 #include "xinput_host.h"
+#include "gip_button_map.h"
 #include <stdio.h>
 
 // Xbox One auth passthrough support
@@ -267,11 +268,15 @@ bool tuh_xinput_wired_chatpad_keepalive(uint8_t dev_addr, uint8_t instance)
 static void xboxone_init( xinputh_interface_t *xid_itf, uint8_t dev_addr, uint8_t instance)
 {
     uint16_t PID, VID;
+    bool ok;
     tuh_vid_pid_get(dev_addr, &VID, &PID);
+    printf("[xinput_host] xboxone_init: VID=%04x PID=%04x\n", VID, PID);
 
-    tuh_xinput_send_report(dev_addr, instance, xboxone_power_on, sizeof(xboxone_power_on));
+    ok = tuh_xinput_send_report(dev_addr, instance, xboxone_power_on, sizeof(xboxone_power_on));
+    printf("[xinput_host] xboxone_init: power_on %s\n", ok ? "sent" : "FAILED");
     wait_for_tx_complete(dev_addr, xid_itf->ep_out);
-    tuh_xinput_send_report(dev_addr, instance, xboxone_s_init, sizeof(xboxone_s_init));
+    ok = tuh_xinput_send_report(dev_addr, instance, xboxone_s_init, sizeof(xboxone_s_init));
+    printf("[xinput_host] xboxone_init: s_init %s\n", ok ? "sent" : "FAILED");
     wait_for_tx_complete(dev_addr, xid_itf->ep_out);
 
     if (VID == 0x045e && (PID == 0x0b00))
@@ -283,9 +288,12 @@ static void xboxone_init( xinputh_interface_t *xid_itf, uint8_t dev_addr, uint8_
     //Required for PDP aftermarket controllers
     if (VID == 0x0e6f)
     {
-        tuh_xinput_send_report(dev_addr, instance, xboxone_pdp_led_on, sizeof(xboxone_pdp_led_on));
+        printf("[xinput_host] xboxone_init: PDP pad - sending LED + auth request\n");
+        ok = tuh_xinput_send_report(dev_addr, instance, xboxone_pdp_led_on, sizeof(xboxone_pdp_led_on));
+        printf("[xinput_host] xboxone_init: pdp_led %s\n", ok ? "sent" : "FAILED");
         wait_for_tx_complete(dev_addr, xid_itf->ep_out);
-        tuh_xinput_send_report(dev_addr, instance, xboxone_pdp_auth, sizeof(xboxone_pdp_auth));
+        ok = tuh_xinput_send_report(dev_addr, instance, xboxone_pdp_auth, sizeof(xboxone_pdp_auth));
+        printf("[xinput_host] xboxone_init: pdp_auth %s\n", ok ? "sent" : "FAILED");
         wait_for_tx_complete(dev_addr, xid_itf->ep_out);
     }
 }
@@ -326,6 +334,16 @@ bool tuh_xinput_send_report(uint8_t dev_addr, uint8_t instance, const uint8_t *t
         return false;
     }
     return true;
+}
+
+bool tuh_xinput_abort_out(uint8_t dev_addr, uint8_t instance)
+{
+    xinputh_interface_t *xid_itf = get_instance(dev_addr, instance);
+    if (!xid_itf) {
+        return false;
+    }
+    printf("[xinput_host] aborting stuck OUT transfer on ep 0x%02x\n", xid_itf->ep_out);
+    return tuh_edpt_abort_xfer(dev_addr, xid_itf->ep_out);
 }
 
 bool tuh_xinput_set_led(uint8_t dev_addr, uint8_t instance, uint8_t quadrant, bool block)
@@ -1057,26 +1075,43 @@ bool xinputh_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, ui
         }
         else if (xid_itf->type == XBOXONE)
         {
+            // Diagnostics: report what the controller is actually sending, so a
+            // stalled GIP handshake can be told apart from dropped packets.
+            {
+                static uint32_t gip_rx_total = 0;
+                static uint32_t gip_rx_input = 0;
+                static uint8_t  gip_last_cmd = 0;
+                gip_rx_total++;
+                if (rdata[0] == GIP_CMD_INPUT) {
+                    gip_rx_input++;
+                    // Print every single input report as it lands: they are
+                    // rare enough (single digits so far) that this costs
+                    // nothing, and waiting for the 256-packet window meant a
+                    // pad that sent a couple of reports and stopped looked
+                    // exactly like a pad that never sent any.
+                    printf("[xinput_host] PADRX input #%lu btn=0x%02x%02x trig=%02x%02x\n",
+                           (unsigned long)gip_rx_input,
+                           rdata[5], rdata[4], rdata[6], rdata[7]);
+                }
+                gip_last_cmd = rdata[0];
+                if ((gip_rx_total & 0xFF) == 0) {
+                    printf("[xinput_host] PADRX window: total=%lu input=%lu last_cmd=0x%02x\n",
+                           (unsigned long)gip_rx_total,
+                           (unsigned long)gip_rx_input,
+                           gip_last_cmd);
+                }
+            }
+
             if (rdata[0] == GIP_CMD_INPUT)
             {
                 tu_memclr(pad, sizeof(xinput_gamepad_t));
                 uint16_t wButtons = rdata[5] << 8 | rdata[4];
 
-                //Map digital buttons
-                if (wButtons & (1 << 8)) pad->wButtons |= XINPUT_GAMEPAD_DPAD_UP;
-                if (wButtons & (1 << 9)) pad->wButtons |= XINPUT_GAMEPAD_DPAD_DOWN;
-                if (wButtons & (1 << 10)) pad->wButtons |= XINPUT_GAMEPAD_DPAD_LEFT;
-                if (wButtons & (1 << 11)) pad->wButtons |= XINPUT_GAMEPAD_DPAD_RIGHT;
-                if (wButtons & (1 << 2)) pad->wButtons |= XINPUT_GAMEPAD_START;
-                if (wButtons & (1 << 3)) pad->wButtons |= XINPUT_GAMEPAD_BACK;
-                if (wButtons & (1 << 14)) pad->wButtons |= XINPUT_GAMEPAD_LEFT_THUMB;
-                if (wButtons & (1 << 15)) pad->wButtons |= XINPUT_GAMEPAD_RIGHT_THUMB;
-                if (wButtons & (1 << 12)) pad->wButtons |= XINPUT_GAMEPAD_LEFT_SHOULDER;
-                if (wButtons & (1 << 13)) pad->wButtons |= XINPUT_GAMEPAD_RIGHT_SHOULDER;
-                if (wButtons & (1 << 4)) pad->wButtons |= XINPUT_GAMEPAD_A;
-                if (wButtons & (1 << 5)) pad->wButtons |= XINPUT_GAMEPAD_B;
-                if (wButtons & (1 << 6)) pad->wButtons |= XINPUT_GAMEPAD_X;
-                if (wButtons & (1 << 7)) pad->wButtons |= XINPUT_GAMEPAD_Y;
+                //Map digital buttons through the configurable table, so a pad
+                //that lays its button word out differently can be corrected by
+                //downloading a new map instead of by reflashing (see gip_button_map.h).
+                pad->wButtons |= gip_button_map_apply(gip_button_map_current(),
+                                                      wButtons);
                 if (rdata[22] && 0x01) pad->wButtons   |= XINPUT_GAMEPAD_SHARE;
 
                 //Map the left and right triggers
@@ -1112,9 +1147,16 @@ bool xinputh_xfer_cb(uint8_t dev_addr, uint8_t ep_addr, xfer_result_t result, ui
             }
             else if (rdata[0] == GIP_CMD_AUTHENTICATE || rdata[0] == GIP_CMD_FINAL_AUTH)
             {
-                // Auth response from Xbox One controller - forward to auth passthrough
-                printf("[xinput_host] Auth response from controller: cmd=0x%02x len=%lu\n",
-                       rdata[0], (unsigned long)xferred_bytes);
+                // Auth response from Xbox One controller - forward to auth passthrough.
+                //
+                // During a chunked upload the pad speaks every few milliseconds, and this
+                // line alone accounted for 1789 prints in one session (see
+                // tests/gip_native/test_xbone_auth_upload.c). xbone_auth reports the same
+                // chunks already and dedupes them, so here we speak only outside a burst.
+                if (!xbone_auth_upload_in_flight()) {
+                    printf("[xinput_host] Auth response from controller: cmd=0x%02x len=%lu\n",
+                           rdata[0], (unsigned long)xferred_bytes);
+                }
                 xbone_auth_report_received(dev_addr, instance, rdata, xferred_bytes);
             }
             else if (rdata[0] != GIP_CMD_ACK)
